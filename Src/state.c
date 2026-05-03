@@ -1,0 +1,34 @@
+#include "state.h"
+
+const char* SystemStateStrings[] = {
+  "IDLE",
+  "WORKING"
+};
+
+const char* AlarmStateStrings[] = {
+  "NONE",
+  "COMPLETE",
+  "LOW",
+  "HIGH"
+};
+
+volatile uint16_t      xDropCount   = 0;  // 中断计数
+volatile uint16_t      xLastCmdTime = 0;  // 上次收信时间
+volatile float         xCurrentSpeed;     // 当前流速
+volatile SystemState_t xSystemState;      // 系统状态
+volatile AlarmState_t  xAlarmState;       // 报警状态
+volatile AlarmState_t  xLastAlarmState;   // 上次报警状态
+
+const char* Get_State_String(SystemState_t xState) {
+  if (xState < STATE_MAX) {
+    return SystemStateStrings[xState];
+  }
+  return "UNKNOWN";
+}
+
+const char* Get_Alarm_String(AlarmState_t xState) {
+  if (xState < ALARM_MAX) {
+    return AlarmStateStrings[xState];
+  }
+  return "UNKNOWN";
+}
