@@ -31,6 +31,9 @@ HAL_StatusTypeDef UART_WaitForString(UART_HandleTypeDef *huart, const char *targ
   return HAL_TIMEOUT;
 }
 void System_Handshake(UART_HandleTypeDef *huart) {
+  // Pre. 清空可能的寄存器残留
+  __HAL_UART_FLUSH_DRREGISTER(huart);
+
   // 1. 等待收到 "SYN\n"
   while (UART_WaitForString(huart, "SYN\r\n", HAL_MAX_DELAY) != HAL_OK);
 
@@ -41,6 +44,6 @@ void System_Handshake(UART_HandleTypeDef *huart) {
   // 3. 再次接收到 "ACK\n" 后退出
   while (UART_WaitForString(huart, "ACK\r\n", HAL_MAX_DELAY) != HAL_OK);
 
-  // 握手成功，可以清空一下残留的寄存器
+  // After. 握手成功，可以清空一下残留的寄存器
   __HAL_UART_FLUSH_DRREGISTER(huart);
 }

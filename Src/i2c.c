@@ -21,10 +21,6 @@
 #include "i2c.h"
 
 /* USER CODE BEGIN 0 */
-#include "cmsis_os2.h"
-
-/* Mutex used to protect access to the I2C bus when running under RTOS */
-static osMutexId_t i2c_mutex = NULL;
 
 /* USER CODE END 0 */
 
@@ -148,27 +144,5 @@ HAL_StatusTypeDef I2C_Check_Device(I2C_HandleTypeDef *hi2c, uint16_t DevAddress)
 {
   /* Use HAL helper to probe device presence (sends START + address, checks ACK) */
   return HAL_I2C_IsDeviceReady(hi2c, DevAddress, 3, I2C_TIMEOUT);
-}
-
-void I2C_MutexInit(void)
-{
-  if (i2c_mutex == NULL) {
-    osMutexAttr_t attr = { .name = "i2c_mutex" };
-    i2c_mutex = osMutexNew(&attr);
-  }
-}
-
-void I2C_MutexLock(void)
-{
-  if (i2c_mutex != NULL) {
-    osMutexAcquire(i2c_mutex, osWaitForever);
-  }
-}
-
-void I2C_MutexUnlock(void)
-{
-  if (i2c_mutex != NULL) {
-    osMutexRelease(i2c_mutex);
-  }
 }
 /* USER CODE END 1 */

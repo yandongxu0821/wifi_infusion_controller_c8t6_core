@@ -42,10 +42,6 @@ void MX_I2C1_Init(void);
 
 /* USER CODE BEGIN Prototypes */
 HAL_StatusTypeDef I2C_Check_Device(I2C_HandleTypeDef *hi2c, uint16_t DevAddress);
-/* Simple I2C mutex helpers (created in MX_FREERTOS_Init) */
-void I2C_MutexInit(void);
-void I2C_MutexLock(void);
-void I2C_MutexUnlock(void);
 /* USER CODE END Prototypes */
 
 #ifdef __cplusplus

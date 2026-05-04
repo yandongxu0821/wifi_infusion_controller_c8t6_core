@@ -12,12 +12,6 @@ extern I2C_HandleTypeDef hi2c1;
 // 使用 static 确保局部可见，使用 uint8_t 对应 I2C 传输位宽
 static uint8_t OLED_GRAM[1025];
 
-/* Owner thread for current DMA transfer (used to signal completion) */
-static osThreadId_t ssd_owner_thread = NULL;
-
-#define SSD1315_DMA_DONE_FLAG  (1U)
-#define SSD1315_DMA_ERROR_FLAG (1U<<1)
-
 /**
  * @brief 向OLED发送命令
  */
@@ -41,12 +35,6 @@ void SSD1315_Clear(void)
  */
 void SSD1315_Update(void)
 {
-  /* Acquire I2C mutex to serialize access with other peripherals */
-  I2C_MutexLock();
-
-  /* Remember caller thread so ISR callback can notify it */
-  ssd_owner_thread = osThreadGetId();
-
   /* 1. 发送命令告诉 OLED：接下来从第0列、第0页开始接收数据 */
   OLED_WriteCmd(0x21); // Set Column Address
   OLED_WriteCmd(0x00); // Start 0
@@ -60,19 +48,8 @@ void SSD1315_Update(void)
   if (HAL_I2C_Master_Transmit_DMA(&hi2c1, OLED_ADDR, OLED_GRAM, 1025) != HAL_OK) {
     /* DMA 启动失败，回退为阻塞传输并释放互斥 */
     HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDR, OLED_GRAM, 1025, 500);
-    ssd_owner_thread = NULL;
-    I2C_MutexUnlock();
     return;
   }
-
-  /* 等待 DMA 完成或错误（线程标志由回调中设置） */
-  uint32_t flags = osThreadFlagsWait(SSD1315_DMA_DONE_FLAG | SSD1315_DMA_ERROR_FLAG, osFlagsWaitAny, 2000);
-
-  /* 清理并释放互斥 */
-  ssd_owner_thread = NULL;
-  I2C_MutexUnlock();
-
-  (void)flags; /* 目前仅用于触发等待；上层可扩展错误处理 */
 }
 
 /**
@@ -81,9 +58,6 @@ void SSD1315_Update(void)
  */
 void SSD1315_Init(void)
 {
-  /* 使用互斥保护整个初始化序列，避免在初始化过程中被中断或并发访问 */
-  I2C_MutexLock();
-
   /* 基础配置 */
   OLED_WriteCmd(0xAE); // 关闭显示
   OLED_WriteCmd(0xD5); // 设置时钟分频
@@ -126,16 +100,10 @@ void SSD1315_Init(void)
 
   HAL_Delay(10);       // 等待屏幕稳定
 
-  /* 初始化显存控制字节并发送一次全屏数据（阻塞，初始化阶段使用） */
+  // 初始化显存控制字节
   OLED_GRAM[0] = 0x40; // 开启数据流模式
   SSD1315_Clear();
-
-  /* 发送当前显存（阻塞方式，避免在 init 中处理异步回调） */
-  OLED_WriteCmd(0x21); OLED_WriteCmd(0x00); OLED_WriteCmd(0x7F);
-  OLED_WriteCmd(0x22); OLED_WriteCmd(0x00); OLED_WriteCmd(0x07);
-  HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDR, OLED_GRAM, 1025, 500);
-
-  I2C_MutexUnlock();
+  SSD1315_Update();
 }
 /**
  * @brief 画点函数
@@ -180,30 +148,5 @@ void SSD1315_ShowString(uint8_t x, uint8_t y, char *str)
     x += 8;
     if (x > 120) { x = 0; y += 2; }
     if (y > 7) break;
-  }
-}
-
-/**
- * HAL 回调：I2C 主传输完成（DMA）
- * 在回调中设置线程标志，通知启动 DMA 的线程继续并释放互斥。
- */
-void HAL_I2C_MasterTxCpltCallback(I2C_HandleTypeDef *hi2c)
-{
-  if (hi2c != NULL && hi2c->Instance == I2C1) {
-    if (ssd_owner_thread != NULL) {
-      osThreadFlagsSet(ssd_owner_thread, SSD1315_DMA_DONE_FLAG);
-    }
-  }
-}
-
-/**
- * HAL 回调：I2C 错误
- */
-void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
-{
-  if (hi2c != NULL && hi2c->Instance == I2C1) {
-    if (ssd_owner_thread != NULL) {
-      osThreadFlagsSet(ssd_owner_thread, SSD1315_DMA_ERROR_FLAG);
-    }
   }
 }
