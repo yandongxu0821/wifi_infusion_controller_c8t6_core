@@ -141,7 +141,7 @@ void MX_FREERTOS_Init(void) {
   SSD1315_ShowString(0, 2, "WiFi Connected");
   SSD1315_Update();
 
-	/* 启动 UART DMA + IDLE 接收（在握手完成后启动，避免与阻塞接收冲突） */
+	// 启动 UART DMA 空闲中断接收
   if (HAL_UARTEx_ReceiveToIdle_DMA(&huart1, g_UartRxBuf, UART_RX_BUF_SZ) != HAL_OK) {
     Error_Handler();
   }
@@ -199,31 +199,38 @@ void MX_FREERTOS_Init(void) {
 void StartDisplayTask(void *argument)
 {
   /* USER CODE BEGIN StartDisplayTask */
+  char buffer[20];
+  uint16_t xLuxRawValue = 0;
   /* Infinite loop */
   for(;;) {
     SSD1315_Clear();
-    char buffer[20];
 
+    // Line 1: State: xxxx
     snprintf((char*)buffer, sizeof(buffer), "State: %s", Get_State_String(xSystemState));
     SSD1315_ShowString(0, 0, (char*)buffer);
 
+    // Line 2: Alarm: xxxx
     snprintf((char*)buffer, sizeof(buffer), "Alarm: %s", Get_Alarm_String(xAlarmState));
     SSD1315_ShowString(0, 2, (char*)buffer);
 
+    // Line 3: Speed: xx.xx
     snprintf((char*)buffer, sizeof(buffer), "Speed: %.2f", xCurrentSpeed);
     SSD1315_ShowString(0, 4, (char*)buffer);
 
     if (xBH1750Present) {
-      uint16_t xLuxRawValue = BH1750_Read();
+      xLuxRawValue = BH1750_Read();
       xLuxValue = xLuxRawValue / 1.2;
       if (xShowStatus) {
+        // Line 4: Light: xx.xx
         snprintf((char*)buffer, sizeof(buffer), "Light: %.2f", xLuxValue);
         SSD1315_ShowString(0, 6, (char*)buffer);
       } else {
+        // Line 4: LO=xx.xx HI=xx.xx
         snprintf((char*)buffer, sizeof(buffer), "LO=%.2f HI=%.2f", xFlowRateLimits[0], xFlowRateLimits[1]);
         SSD1315_ShowString(0, 6, (char*)buffer);
       }
     } else {
+      // Line 4: LO=xx.xx HI=xx.xx
       snprintf((char*)buffer, sizeof(buffer), "LO=%.2f HI=%.2f", xFlowRateLimits[0], xFlowRateLimits[1]);
       SSD1315_ShowString(0, 6, (char*)buffer);
     }
@@ -652,7 +659,7 @@ clear:
 void SendStatus(void) {
   char status_message[20];
 
-  if (xSystemState == IDLE) {   // Only report state when idle, to reduce unnecessary updates
+  if (xSystemState == IDLE) {
     snprintf(status_message, sizeof(status_message), "STATE,%s\n", Get_State_String(xSystemState) );
     SendDataToESP(status_message);
     

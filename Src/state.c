@@ -12,12 +12,12 @@ const char* AlarmStateStrings[] = {
   "HIGH"
 };
 
-volatile uint16_t      xDropCount   = 0;  // 中断计数
-volatile uint16_t      xLastCmdTime = 0;  // 上次收信时间
-volatile float         xCurrentSpeed;     // 当前流速
-volatile SystemState_t xSystemState;      // 系统状态
-volatile AlarmState_t  xAlarmState;       // 报警状态
-volatile AlarmState_t  xLastAlarmState;   // 上次报警状态
+volatile uint16_t      xDropCount      = 0;            // 中断计数
+volatile uint16_t      xLastCmdTime    = 0;            // 上次收信时间
+volatile float         xCurrentSpeed;                  // 当前流速
+volatile SystemState_t xSystemState    = IDLE;         // 系统状态
+volatile AlarmState_t  xAlarmState     = ALARM_NONE;   // 报警状态
+volatile AlarmState_t  xLastAlarmState = ALARM_NONE;   // 上次报警状态
 
 const char* Get_State_String(SystemState_t xState) {
   if (xState < STATE_MAX) {
