@@ -58,12 +58,13 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-float   xLuxValue          = 0;             // 当前光照强度
-float   xFlowRateLimits[2] = {1.00, 8.00};  // 滴速上下限，单位滴/秒
-uint8_t xBH1750Present     = 0;             // 标志位，表示 BH1750 是否存在
-uint8_t xShowStatus        = 0;             // 显示切换标志，0显示状态，1显示光照
-uint8_t xShowCounts        = 0;             // 显示切换计数
-static char xUartTxBuffer[64];              // UART 发送缓冲区
+float    xLuxValue          = 0;          // 当前光照强度
+uint16_t xFlowRateLimits[2] = {60, 480};  // 滴速上下限，单位滴/分钟
+uint8_t  xBH1750Present     = 0;          // 标志位，表示 BH1750 是否存在
+uint8_t  xShowStatus        = 0;          // 显示切换标志，0显示状态，1显示光照
+uint8_t  xShowCounts        = 0;          // 显示切换计数
+static char xUartTxBuffer[64];            // UART 发送缓冲区
+volatile Flow_t flow        = {0};        // 滴速计算结构体
 /* USER CODE END Variables */
 /* Definitions for DisplayTask */
 osThreadId_t DisplayTaskHandle;
@@ -99,6 +100,10 @@ const osThreadAttr_t CommTask_attributes = {
 
 // static int parse_uint(const char *s, int *value);
 static int parse_float(const char *s, float *value);
+static uint16_t Calc_Period_Speed(uint32_t dt_ms);
+static uint16_t EMA_Filter(uint16_t prev, uint16_t now);
+static void Update_Count_Speed(void);
+static uint16_t Fuse_Speed(uint16_t sp_period, uint16_t sp_count, uint32_t dt);
 void SendDataToESP(char *data);
 void ParseCommand(char *command);
 void SendHeartbeat(void);
@@ -191,10 +196,10 @@ void MX_FREERTOS_Init(void) {
 
 /* USER CODE BEGIN Header_StartDisplayTask */
 /**
-* @brief Function implementing the DisplayTask thread.
-* @param argument: Not used
-* @retval None
-*/
+  * @brief Function implementing the DisplayTask thread.
+  * @param argument: Not used
+  * @retval None
+  */
 /* USER CODE END Header_StartDisplayTask */
 void StartDisplayTask(void *argument)
 {
@@ -214,7 +219,7 @@ void StartDisplayTask(void *argument)
     SSD1315_ShowString(0, 2, (char*)buffer);
 
     // Line 3: Speed: xx.xx
-    snprintf((char*)buffer, sizeof(buffer), "Speed: %.2f", xCurrentSpeed);
+    snprintf((char*)buffer, sizeof(buffer), "Speed: %d", flow.speed_cpm);
     SSD1315_ShowString(0, 4, (char*)buffer);
 
     if (xBH1750Present) {
@@ -225,13 +230,13 @@ void StartDisplayTask(void *argument)
         snprintf((char*)buffer, sizeof(buffer), "Light: %.2f", xLuxValue);
         SSD1315_ShowString(0, 6, (char*)buffer);
       } else {
-        // Line 4: LO=xx.xx HI=xx.xx
-        snprintf((char*)buffer, sizeof(buffer), "LO=%.2f HI=%.2f", xFlowRateLimits[0], xFlowRateLimits[1]);
+        // Line 4: LO=xxx HI=xxx
+        snprintf((char*)buffer, sizeof(buffer), "LO=%d HI=%d", xFlowRateLimits[0], xFlowRateLimits[1]);
         SSD1315_ShowString(0, 6, (char*)buffer);
       }
     } else {
-      // Line 4: LO=xx.xx HI=xx.xx
-      snprintf((char*)buffer, sizeof(buffer), "LO=%.2f HI=%.2f", xFlowRateLimits[0], xFlowRateLimits[1]);
+      // Line 4: LO=xxx HI=xxx
+      snprintf((char*)buffer, sizeof(buffer), "LO=%d HI=%d", xFlowRateLimits[0], xFlowRateLimits[1]);
       SSD1315_ShowString(0, 6, (char*)buffer);
     }
 
@@ -255,104 +260,36 @@ void StartDisplayTask(void *argument)
 void StartFlowDetectTask(void *argument)
 {
   /* USER CODE BEGIN StartFlowDetectTask */
-
-  /* 上一次计算滴速的时间 (tick) */
-  uint32_t last_speed_tick = xTaskGetTickCount();
-
-  /* 上一次检测到液滴的时间 (tick)，用于超时判断 */
-  uint32_t last_drop_tick  = xTaskGetTickCount();
-
-  /* 3秒滑动窗口，每个元素保存1秒内的滴数 */
-  uint16_t sec_count[3] = {0};
-
-  /* 当前滑动窗口索引 */
-  uint8_t index = 0;
-
-  /* 最近3秒总滴数 */
-  uint32_t sum = 0;
-
-  /* 滴速更新周期 (ms) */
-  const uint32_t speed_period = 1000;
+  uint16_t period_raw = 0;
 
   /* 无滴超时时间 (ms)，超过则认为输液完成 */
   const uint32_t timeout = 5000;
-
   /* Infinite loop */
   for(;;)
   {
-    /* 任务周期 10ms */
-    osDelay(10);
+    // 1. 更新计数法
+    Update_Count_Speed();
 
-    /*====================================================
-      当系统处于 IDLE 状态时，不进行滴速计算
-      清空所有计数器，确保重新开始时状态正确
-    ====================================================*/
-    if (xSystemState == IDLE)
-    {
-      xDropCount = 0;
+    // 2. 周期法计算
+    if (flow.interval_ms > 0 && flow.interval_ms < 3000) {
+      period_raw = Calc_Period_Speed(flow.interval_ms);
 
-      sum = 0;
-
-      for (int i = 0; i < 3; i++)
-        sec_count[i] = 0;
-
-      xAlarmState = ALARM_NONE;
-
-      continue;
+      flow.speed_period = EMA_Filter(flow.speed_period, period_raw);
     }
 
-    /*====================================================
-      每 1 秒更新一次滴速
-      使用滑动窗口统计最近 3 秒的滴数
-    ====================================================*/
-    if (xTaskGetTickCount() - last_speed_tick >= speed_period)
-    {
-      uint16_t new_count;
-
-      /*------------------------------------------
-        临界区读取中断计数
-        防止 EXTI 中断同时修改 xDropCount
-      ------------------------------------------*/
-      taskENTER_CRITICAL();
-      new_count = xDropCount;
-      xDropCount = 0;
-      taskEXIT_CRITICAL();
-
-      /* 如果本秒检测到滴数，更新最后滴时间 */
-      if (new_count > 0)
-      {
-        last_drop_tick = xTaskGetTickCount();
-      }
-
-      /*------------------------------------------
-        滑动窗口更新
-
-        sum = 最近3秒总滴数
-
-        每秒：
-        - 减去最旧的1秒
-        - 加上最新的1秒
-      ------------------------------------------*/
-
-      sum -= sec_count[index];
-
-      sec_count[index] = new_count;
-
-      sum += sec_count[index];
-
-      index++;
-      if (index >= 3)
-        index = 0;
-
-      /*------------------------------------------
-        计算滴速 (滴/秒)
-
-        最近3秒总滴数 / 3
-      ------------------------------------------*/
-      xCurrentSpeed = (float)sum / 3.0f;
-
-      last_speed_tick = xTaskGetTickCount();
+    // 3. 超时处理（你已有逻辑）
+    if (HAL_GetTick() - flow.last_tick > 3000) {
+      flow.speed_cpm = 0;
+    } else {
+      // 4. 融合
+      flow.speed_cpm = Fuse_Speed(
+        flow.speed_period,
+        flow.speed_count,
+        flow.interval_ms
+      );
     }
+
+    osDelay(100);
 
     /*====================================================
       超时判断
@@ -360,35 +297,26 @@ void StartFlowDetectTask(void *argument)
       如果超过 timeout 没有检测到新的液滴
       认为输液完成或阻塞 → ALARM_COMPLETE
     ====================================================*/
-    if (xTaskGetTickCount() - last_drop_tick >= timeout)
-    {
+    if (xTaskGetTickCount() - flow.last_tick >= timeout) {
       xAlarmState = ALARM_COMPLETE;
-    }
-    else
-    {
+    } else {
       /*------------------------------------------
         根据滴速判断报警状态
       ------------------------------------------*/
 
       /* 滴速过快 */
-      if (xCurrentSpeed > 5.0f)
-      {
+      if (flow.speed_cpm > xFlowRateLimits[1]) {
         xAlarmState = ALARM_HIGH;
-      }
-
+      
       /* 滴速过慢 (但不是0) */
-      else if (xCurrentSpeed < 0.5f && xCurrentSpeed > 0.0f)
-      {
+      } else if (flow.speed_cpm < xFlowRateLimits[0] && flow.speed_cpm > 0) {
         xAlarmState = ALARM_LOW;
-      }
-
+      
       /* 正常 */
-      else
-      {
+      } else {
         xAlarmState = ALARM_NONE;
       }
     }
-
   }
 
   /* USER CODE END StartFlowDetectTask */
@@ -396,19 +324,36 @@ void StartFlowDetectTask(void *argument)
 
 /* USER CODE BEGIN Header_StartControlTask */
 /**
-* @brief Function implementing the ControlTask thread.
-* @param argument: Not used
-* @retval None
-*/
+  * @brief Function implementing the ControlTask thread.
+  * @param argument: Not used
+  * @retval None
+  */
 /* USER CODE END Header_StartControlTask */
 void StartControlTask(void *argument)
 {
   /* USER CODE BEGIN StartControlTask */
   // const TickType_t delay_time = pdMS_TO_TICKS(100);
 
+  static GPIO_PinState xPowerLastState = GPIO_PIN_SET; // 上拉默认未按下
+
   /* Infinite loop */
   for(;;) {
-    osDelay(100);
+    osDelay(50);
+
+    GPIO_PinState xPowerCurrentState = HAL_GPIO_ReadPin(PowerKey_GPIO_Port, PowerKey_Pin);
+    static uint32_t lastTick = 0;
+
+    if (xPowerLastState == GPIO_PIN_SET && xPowerCurrentState == GPIO_PIN_RESET) {
+      if ((xTaskGetTickCount() - lastTick) > pdMS_TO_TICKS(50)) {
+        lastTick = xTaskGetTickCount();
+
+        xSystemState = (xSystemState == IDLE) ? WORKING : IDLE;
+        HAL_GPIO_TogglePin(light_GPIO_Port, light_Pin);
+      }
+    }
+
+    xPowerLastState = xPowerCurrentState;
+
     if (xSystemState == WORKING) {
       switch(xAlarmState) {
         case ALARM_COMPLETE:
@@ -553,6 +498,50 @@ static int parse_float(const char *s, float *value) {
   return 1;
 }
 
+static uint16_t Calc_Period_Speed(uint32_t dt_ms) {
+  if (dt_ms == 0) return 0;
+
+  // 次/分钟 = 60000 / dt(ms)
+  return (uint16_t)(60000UL / dt_ms);
+}
+
+static uint16_t EMA_Filter(uint16_t prev, uint16_t now) {
+  // alpha ≈ 0.25
+  return (prev * 3 + now) / 4;
+}
+
+static void Update_Count_Speed(void) {
+  static uint32_t last_time = 0;
+  uint32_t now = HAL_GetTick();
+
+  if (now - last_time >= 1000) {
+    // 次/分钟 = count * 60
+    flow.speed_count = flow.pulse_count * 60;
+
+    flow.pulse_count = 0;
+    last_time = now;
+  }
+}
+
+static uint16_t Fuse_Speed(uint16_t sp_period, uint16_t sp_count, uint32_t dt) {
+  // 阈值：500ms（≈2Hz）
+  if (dt >= 500) {
+    // 低速：完全用周期法
+    return sp_period;
+
+  } else /*if (dt <= 100)*/ {
+    // 高速：完全用计数法
+    return sp_count;
+
+  } /* else {
+    // 中间区：线性融合
+    uint32_t w = (dt - 100);   // 0~400
+    // period权重：w，count权重：400-w
+
+    return (sp_period * w + sp_count * (400 - w)) / 400;
+  }*/
+}
+
 void SendDataToESP(char *data) {
   while (huart1.gState != HAL_UART_STATE_READY); // 确保准备好了
     
@@ -652,8 +641,8 @@ void ParseCommand(char *command) {
     }
   }
 
-clear:
-  command[0] = '\0';
+  clear:
+    command[0] = '\0';
 }
 
 void SendStatus(void) {

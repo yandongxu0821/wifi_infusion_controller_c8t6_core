@@ -36,7 +36,16 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
+typedef struct {
+  uint32_t last_tick;       // 上一次脉冲时间
+  uint32_t interval_ms;     // 当前周期（ms）
 
+  uint16_t pulse_count;     // 窗口计数
+  uint16_t speed_cpm;       // 最终速度（次/分钟）
+
+  uint16_t speed_period;    // 周期法速度
+  uint16_t speed_count;     // 计数法速度
+} Flow_t;
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
@@ -68,7 +77,6 @@ void Error_Handler(void);
 #define PhotoelectricSensor_EXTI_IRQn EXTI15_10_IRQn
 #define PowerKey_Pin GPIO_PIN_14
 #define PowerKey_GPIO_Port GPIOB
-#define PowerKey_EXTI_IRQn EXTI15_10_IRQn
 
 /* USER CODE BEGIN Private defines */
 

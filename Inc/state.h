@@ -22,7 +22,6 @@ typedef enum {
 extern const char* SystemStateStrings[];
 extern const char* AlarmStateStrings[];
 
-extern volatile uint16_t      xDropCount;
 extern volatile uint16_t      xLastCmdTime;
 extern volatile float         xCurrentSpeed;
 extern volatile SystemState_t xSystemState;

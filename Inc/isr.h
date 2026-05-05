@@ -11,6 +11,8 @@ extern osThreadId_t CommTaskHandle;
 
 extern volatile uint32_t xLastDropTickISR;
 
+extern volatile Flow_t flow;
+
 // UART DMA 接收 buffer 大小（可根据需要调整）
 #define UART_RX_BUF_SZ 256
 

@@ -40,31 +40,32 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
   */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
   HAL_GPIO_TogglePin(light_GPIO_Port, light_Pin);
+
   if (GPIO_Pin == PhotoelectricSensor_Pin) {
     uint32_t now = HAL_GetTick();
     if (now - xLastDropTickISR >= PHOTO_DEBOUNCE_MS) {
       xLastDropTickISR = now;
-      xDropCount++;
+
+      flow.interval_ms = now - flow.last_tick;
+      flow.last_tick = now;
+
+      flow.pulse_count++;
     }
   }
   
-  if (GPIO_Pin == PowerKey_Pin) {
-    uint32_t now = HAL_GetTick();
+  // if (GPIO_Pin == PowerKey_Pin) {
+  //   uint32_t now = HAL_GetTick();
 
-    // 消抖时间过滤
-    if (now - xLastKeyTick < KEY_DEBOUNCE_MS)
-      return;
+  //   // 消抖时间过滤
+  //   if (now - xLastKeyTick < KEY_DEBOUNCE_MS)
+  //     return;
 
-    xLastKeyTick = now;
+  //   xLastKeyTick = now;
 
-    // 检测是否真的按下
-    if (HAL_GPIO_ReadPin(PowerKey_GPIO_Port, PowerKey_Pin) == GPIO_PIN_RESET) {
+  //   // 检测是否真的按下
+  //   if (HAL_GPIO_ReadPin(PowerKey_GPIO_Port, PowerKey_Pin) == GPIO_PIN_RESET) {
 
-      if (xSystemState == IDLE) {
-        xSystemState = WORKING;
-      } else {
-        xSystemState = IDLE;
-      }
-    }
-  }
+  //     xSystemState = (xSystemState == IDLE) ? WORKING : IDLE;
+  //   }
+  // }
 }

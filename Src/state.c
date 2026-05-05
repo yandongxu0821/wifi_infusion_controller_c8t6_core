@@ -12,7 +12,6 @@ const char* AlarmStateStrings[] = {
   "HIGH"
 };
 
-volatile uint16_t      xDropCount      = 0;            // 中断计数
 volatile uint16_t      xLastCmdTime    = 0;            // 上次收信时间
 volatile float         xCurrentSpeed;                  // 当前流速
 volatile SystemState_t xSystemState    = IDLE;         // 系统状态
