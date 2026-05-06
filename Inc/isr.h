@@ -14,7 +14,7 @@ extern volatile uint32_t xLastDropTickISR;
 extern volatile Flow_t flow;
 
 // UART DMA 接收 buffer 大小（可根据需要调整）
-#define UART_RX_BUF_SZ 256
+#define UART_RX_BUF_SZ 127
 
 // 全局 DMA 接收区与实际接收长度（在回调中设置）
 extern uint8_t g_UartRxBuf[UART_RX_BUF_SZ];

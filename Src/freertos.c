@@ -49,6 +49,9 @@
 #define REPORT_INTERVAL 5000
 #define UART_TIMEOUT 8000
 
+#define FLOW_FLAG_SLOW     (1 << 0)  // bit0: 超低速标志
+#define FLOW_FLAG_STOPPED  (1 << 1)  // bit1: 完成/停止标志
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -70,22 +73,22 @@ volatile Flow_t flow        = {0};        // 滴速计算结构体
 osThreadId_t DisplayTaskHandle;
 const osThreadAttr_t DisplayTask_attributes = {
   .name = "DisplayTask",
-  .stack_size = 128 * 4,
+  .stack_size = 96 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for FlowDetectTask */
 osThreadId_t FlowDetectTaskHandle;
 const osThreadAttr_t FlowDetectTask_attributes = {
   .name = "FlowDetectTask",
-  .stack_size = 128 * 4,
+  .stack_size = 96 * 4,
   .priority = (osPriority_t) osPriorityNormal1,
 };
-/* Definitions for ControlTask */
-osThreadId_t ControlTaskHandle;
-const osThreadAttr_t ControlTask_attributes = {
-  .name = "ControlTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+/* Definitions for AlarmTask */
+osThreadId_t AlarmTaskHandle;
+const osThreadAttr_t AlarmTask_attributes = {
+  .name = "AlarmTask",
+  .stack_size = 64 * 4,
+  .priority = (osPriority_t) osPriorityLow,
 };
 /* Definitions for CommTask */
 osThreadId_t CommTaskHandle;
@@ -94,12 +97,19 @@ const osThreadAttr_t CommTask_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for KeyTask */
+osThreadId_t KeyTaskHandle;
+const osThreadAttr_t KeyTask_attributes = {
+  .name = "KeyTask",
+  .stack_size = 64 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 
-// static int parse_uint(const char *s, int *value);
-static int parse_float(const char *s, float *value);
+static int parse_uint(const char *s, uint16_t *value);
+// static int parse_float(const char *s, float *value);
 static uint16_t Calc_Period_Speed(uint32_t dt_ms);
 static uint16_t EMA_Filter(uint16_t prev, uint16_t now);
 static void Update_Count_Speed(void);
@@ -113,8 +123,9 @@ void SendStatus(void);
 
 void StartDisplayTask(void *argument);
 void StartFlowDetectTask(void *argument);
-void StartControlTask(void *argument);
+void StartAlarmTask(void *argument);
 void StartCommTask(void *argument);
+void StartKeyTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -178,11 +189,14 @@ void MX_FREERTOS_Init(void) {
   /* creation of FlowDetectTask */
   FlowDetectTaskHandle = osThreadNew(StartFlowDetectTask, NULL, &FlowDetectTask_attributes);
 
-  /* creation of ControlTask */
-  ControlTaskHandle = osThreadNew(StartControlTask, NULL, &ControlTask_attributes);
+  /* creation of AlarmTask */
+  AlarmTaskHandle = osThreadNew(StartAlarmTask, NULL, &AlarmTask_attributes);
 
   /* creation of CommTask */
   CommTaskHandle = osThreadNew(StartCommTask, NULL, &CommTask_attributes);
+
+  /* creation of KeyTask */
+  KeyTaskHandle = osThreadNew(StartKeyTask, NULL, &KeyTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -204,7 +218,7 @@ void MX_FREERTOS_Init(void) {
 void StartDisplayTask(void *argument)
 {
   /* USER CODE BEGIN StartDisplayTask */
-  char buffer[20];
+  char buffer[24];
   uint16_t xLuxRawValue = 0;
   /* Infinite loop */
   for(;;) {
@@ -262,98 +276,97 @@ void StartFlowDetectTask(void *argument)
   /* USER CODE BEGIN StartFlowDetectTask */
   uint16_t period_raw = 0;
 
-  /* 无滴超时时间 (ms)，超过则认为输液完成 */
-  const uint32_t timeout = 5000;
+  /* 无滴超时时间 (ms) */
+  const uint32_t timeout_slow     = 6000;  // 6秒 → 超低速
+  const uint32_t timeout_complete = 10000; // 10秒 → 完成
+
+  static uint8_t flow_flags = 0; // bit0 = slow_flag, bit1 = stop_triggered
+
   /* Infinite loop */
   for(;;)
   {
-    // 1. 更新计数法
+    /*-------------------------------
+      1. 更新计数法
+    -------------------------------*/
     Update_Count_Speed();
 
-    // 2. 周期法计算
+    /*-------------------------------
+      2. 周期法计算
+    -------------------------------*/
     if (flow.interval_ms > 0 && flow.interval_ms < 3000) {
       period_raw = Calc_Period_Speed(flow.interval_ms);
-
       flow.speed_period = EMA_Filter(flow.speed_period, period_raw);
     }
 
-    // 3. 超时处理（你已有逻辑）
-    if (HAL_GetTick() - flow.last_tick > 3000) {
+    /*-------------------------------
+      3. 融合速度计算
+    -------------------------------*/
+    flow.speed_cpm = Fuse_Speed(
+      flow.speed_period,
+      flow.speed_count,
+      flow.interval_ms
+    );
+
+    /*-------------------------------
+      4. 超低速和完成判断
+    -------------------------------*/
+    uint32_t no_pulse_time = HAL_GetTick() - flow.last_tick;
+
+    // 完成判定（一次性触发）
+    if (no_pulse_time >= timeout_complete && !(flow_flags & FLOW_FLAG_STOPPED)) {
+      flow_flags |= FLOW_FLAG_STOPPED; // 标记完成
+      xAlarmState = ALARM_COMPLETE;
       flow.speed_cpm = 0;
+    } else if (no_pulse_time >= timeout_slow && no_pulse_time < timeout_complete) {
+      flow_flags |= FLOW_FLAG_SLOW;    // 标记超低速
     } else {
-      // 4. 融合
-      flow.speed_cpm = Fuse_Speed(
-        flow.speed_period,
-        flow.speed_count,
-        flow.interval_ms
-      );
+      flow_flags &= ~FLOW_FLAG_SLOW;   // 清除低速标志
+
+      /*-------------------------------
+        5. 根据速度更新报警状态
+      -------------------------------*/
+      if (!(flow_flags & FLOW_FLAG_STOPPED)) {  // 完成锁定期间不更新其他ALARM
+        if (flow.speed_cpm > xFlowRateLimits[1]) {
+          xAlarmState = ALARM_HIGH;
+        } else if (flow.speed_cpm < xFlowRateLimits[0] && flow.speed_cpm > 0) {
+          xAlarmState = ALARM_LOW;
+        } else {
+          xAlarmState = ALARM_NONE;
+        }
+      }
+    }
+
+    /*-------------------------------
+      6. 系统IDLE重置机制
+      进入IDLE时清理所有状态
+    -------------------------------*/
+    if (xSystemState == IDLE) {
+      flow.speed_cpm = 0;
+      flow.speed_period = 0;
+      flow.speed_count = 0;
+      flow_flags = 0;
+      xAlarmState = ALARM_NONE;
     }
 
     osDelay(100);
-
-    /*====================================================
-      超时判断
-
-      如果超过 timeout 没有检测到新的液滴
-      认为输液完成或阻塞 → ALARM_COMPLETE
-    ====================================================*/
-    if (xTaskGetTickCount() - flow.last_tick >= timeout) {
-      xAlarmState = ALARM_COMPLETE;
-    } else {
-      /*------------------------------------------
-        根据滴速判断报警状态
-      ------------------------------------------*/
-
-      /* 滴速过快 */
-      if (flow.speed_cpm > xFlowRateLimits[1]) {
-        xAlarmState = ALARM_HIGH;
-      
-      /* 滴速过慢 (但不是0) */
-      } else if (flow.speed_cpm < xFlowRateLimits[0] && flow.speed_cpm > 0) {
-        xAlarmState = ALARM_LOW;
-      
-      /* 正常 */
-      } else {
-        xAlarmState = ALARM_NONE;
-      }
-    }
   }
 
   /* USER CODE END StartFlowDetectTask */
 }
 
-/* USER CODE BEGIN Header_StartControlTask */
+/* USER CODE BEGIN Header_StartAlarmTask */
 /**
-  * @brief Function implementing the ControlTask thread.
+  * @brief Function implementing the AlarmTask thread.
   * @param argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartControlTask */
-void StartControlTask(void *argument)
+/* USER CODE END Header_StartAlarmTask */
+void StartAlarmTask(void *argument)
 {
-  /* USER CODE BEGIN StartControlTask */
-  // const TickType_t delay_time = pdMS_TO_TICKS(100);
-
-  static GPIO_PinState xPowerLastState = GPIO_PIN_SET; // 上拉默认未按下
-
+  /* USER CODE BEGIN StartAlarmTask */
   /* Infinite loop */
   for(;;) {
-    osDelay(50);
-
-    GPIO_PinState xPowerCurrentState = HAL_GPIO_ReadPin(PowerKey_GPIO_Port, PowerKey_Pin);
-    static uint32_t lastTick = 0;
-
-    if (xPowerLastState == GPIO_PIN_SET && xPowerCurrentState == GPIO_PIN_RESET) {
-      if ((xTaskGetTickCount() - lastTick) > pdMS_TO_TICKS(50)) {
-        lastTick = xTaskGetTickCount();
-
-        xSystemState = (xSystemState == IDLE) ? WORKING : IDLE;
-        HAL_GPIO_TogglePin(light_GPIO_Port, light_Pin);
-      }
-    }
-
-    xPowerLastState = xPowerCurrentState;
-
+    osDelay(100);
     if (xSystemState == WORKING) {
       switch(xAlarmState) {
         case ALARM_COMPLETE:
@@ -377,7 +390,7 @@ void StartControlTask(void *argument)
       HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
     }
   }
-  /* USER CODE END StartControlTask */
+  /* USER CODE END StartAlarmTask */
 }
 
 /* USER CODE BEGIN Header_StartCommTask */
@@ -445,11 +458,45 @@ void StartCommTask(void *argument)
   /* USER CODE END StartCommTask */
 }
 
+/* USER CODE BEGIN Header_StartKeyTask */
+/**
+  * @brief Function implementing the KeyTask thread.
+  * @param argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartKeyTask */
+void StartKeyTask(void *argument)
+{
+  /* USER CODE BEGIN StartKeyTask */
+  static GPIO_PinState xPowerLastState = GPIO_PIN_SET; // 上拉默认未按下
+
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(20);
+    
+    GPIO_PinState xPowerCurrentState = HAL_GPIO_ReadPin(PowerKey_GPIO_Port, PowerKey_Pin);
+    static uint32_t xLastPowerTick = 0;
+
+    if (xPowerLastState == GPIO_PIN_SET && xPowerCurrentState == GPIO_PIN_RESET) {
+      if ((xTaskGetTickCount() - xLastPowerTick) > pdMS_TO_TICKS(50)) {
+        xLastPowerTick = xTaskGetTickCount();
+
+        xSystemState = (xSystemState == IDLE) ? WORKING : IDLE;
+        HAL_GPIO_TogglePin(light_GPIO_Port, light_Pin);
+      }
+    }
+
+    xPowerLastState = xPowerCurrentState;
+  }
+  /* USER CODE END StartKeyTask */
+}
+
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
-/** replace from atoi(), but more fast **
-static int parse_uint(const char *s, int *value) {
+/** replace from atoi(), but more fast **/
+static int parse_uint(const char *s, uint16_t *value) {
   int num = 0;
   if (!s || *s < '0' || *s > '9') return 0;
   while (*s >= '0' && *s <= '9') {
@@ -459,8 +506,8 @@ static int parse_uint(const char *s, int *value) {
   *value = num;
   return 1;
 }
-*/
 
+/*
 static int parse_float(const char *s, float *value) {
   if (!s || !value) return 0;
 
@@ -496,7 +543,7 @@ static int parse_float(const char *s, float *value) {
 
   *value = (float)int_part + (float)frac_part / frac_div;
   return 1;
-}
+} */
 
 static uint16_t Calc_Period_Speed(uint32_t dt_ms) {
   if (dt_ms == 0) return 0;
@@ -529,17 +576,17 @@ static uint16_t Fuse_Speed(uint16_t sp_period, uint16_t sp_count, uint32_t dt) {
     // 低速：完全用周期法
     return sp_period;
 
-  } else /*if (dt <= 100)*/ {
+  } else if (dt <= 100) {
     // 高速：完全用计数法
     return sp_count;
 
-  } /* else {
+  } else {
     // 中间区：线性融合
     uint32_t w = (dt - 100);   // 0~400
     // period权重：w，count权重：400-w
 
     return (sp_period * w + sp_count * (400 - w)) / 400;
-  }*/
+  }
 }
 
 void SendDataToESP(char *data) {
@@ -564,13 +611,13 @@ void ParseCommand(char *command) {
 
     // HI,<value>  上限
     if (command[1] == 'I' && command[2] == ',') {
-      float val;
-      if (!parse_float(command + 3, &val)) {
+      uint16_t val;
+      if (!parse_uint(command + 3, &val)) {
         SendDataToESP("ERROR\n");
         goto clear;
       }
 
-      if (val < 0 || val > 50) {
+      if (val > 1000) {
         SendDataToESP("ERROR\n");
         goto clear;
       }
@@ -585,13 +632,13 @@ void ParseCommand(char *command) {
   else if (first == 'L') {  
     // LO,<value>
     if (command[1] == 'O' && command[2] == ',') {
-      float val;
-      if (!parse_float(command + 3, &val)) {
+      uint16_t val;
+      if (!parse_uint(command + 3, &val)) {
         SendDataToESP("ERROR\n");
         goto clear;
       }
 
-      if (val < 0 || val > 50) {
+      if (val > 250) {
         SendDataToESP("ERROR\n");
         goto clear;
       }
@@ -646,7 +693,7 @@ void ParseCommand(char *command) {
 }
 
 void SendStatus(void) {
-  char status_message[20];
+  char status_message[24];
 
   if (xSystemState == IDLE) {
     snprintf(status_message, sizeof(status_message), "STATE,%s\n", Get_State_String(xSystemState) );
@@ -662,7 +709,7 @@ void SendStatus(void) {
   snprintf(status_message, sizeof(status_message), "STATE,%s\n", Get_State_String(xSystemState) );
   SendDataToESP(status_message);
 
-  snprintf(status_message, sizeof(status_message), "SPEED,%.2f\n", xCurrentSpeed );
+  snprintf(status_message, sizeof(status_message), "SPEED,%d\n", flow.speed_cpm );
   SendDataToESP(status_message);
 
   snprintf(status_message, sizeof(status_message), "ALARM,%s\n", Get_Alarm_String(xAlarmState) );

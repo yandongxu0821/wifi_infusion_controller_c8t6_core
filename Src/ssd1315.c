@@ -1,10 +1,7 @@
 #include "ssd1315.h"
 #include "font16x8.h"
-#include "cmsis_os2.h"
 #include "i2c.h"
 #include "string.h"
-
-#define OLED_ADDR 0x78
 
 extern I2C_HandleTypeDef hi2c1;
 
@@ -14,6 +11,7 @@ static uint8_t OLED_GRAM[1025];
 
 /**
  * @brief 向OLED发送命令
+ * @param cmd: 要发送的命令字节
  */
 void OLED_WriteCmd(uint8_t cmd)
 {
@@ -107,7 +105,9 @@ void SSD1315_Init(void)
 }
 /**
  * @brief 画点函数
- * @param x: 0-127, y: 0-63, color: 1点亮, 0熄灭
+ * @param x: 起始列 (0-127)
+ * @param y: 起始页 (0-63)
+ * @param color: 1点亮, 0熄灭
  */
 void SSD1315_DrawPoint(uint8_t x, uint8_t y, uint8_t color)
 {
@@ -121,7 +121,9 @@ void SSD1315_DrawPoint(uint8_t x, uint8_t y, uint8_t color)
 
 /**
  * @brief 显示单个字符 (16x8)
- * @param y: 所在页 (0-7)
+ * @param x: 起始列 (0-127)
+ * @param y: 起始页 (0-7)
+ * @param chr: ASCII字符
  */
 void SSD1315_ShowChar(uint8_t x, uint8_t y, char chr)
 {
@@ -139,6 +141,9 @@ void SSD1315_ShowChar(uint8_t x, uint8_t y, char chr)
 
 /**
  * @brief 显示字符串
+ * @param x: 起始列 (0-127)
+ * @param y: 起始页 (0-7)
+ * @param str: null结尾字符串
  */
 void SSD1315_ShowString(uint8_t x, uint8_t y, char *str)
 {

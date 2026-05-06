@@ -3,6 +3,8 @@
 
 #include "i2c.h"
 
+#define OLED_ADDR 0x78
+
 void OLED_WriteCmd(uint8_t cmd);
 void SSD1315_Init(void);
 void SSD1315_Clear(void);
