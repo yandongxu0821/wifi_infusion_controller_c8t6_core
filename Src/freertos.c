@@ -47,7 +47,7 @@
 /* USER CODE BEGIN PD */
 
 #define REPORT_INTERVAL 5000
-#define UART_TIMEOUT 8000
+#define UART_TIMEOUT 15000
 
 #define FLOW_FLAG_SLOW     (1 << 0)  // bit0: 超低速标志
 #define FLOW_FLAG_STOPPED  (1 << 1)  // bit1: 完成/停止标志
@@ -112,7 +112,6 @@ static int parse_uint(const char *s, uint16_t *value);
 // static int parse_float(const char *s, float *value);
 static uint16_t Calc_Period_Speed(uint32_t dt_ms);
 static uint16_t EMA_Filter(uint16_t prev, uint16_t now);
-static void Update_Count_Speed(void);
 static uint16_t Fuse_Speed(uint16_t sp_period, uint16_t sp_count, uint32_t dt);
 void SendDataToESP(char *data);
 void ParseCommand(char *command);
@@ -274,7 +273,9 @@ void StartDisplayTask(void *argument)
 void StartFlowDetectTask(void *argument)
 {
   /* USER CODE BEGIN StartFlowDetectTask */
-  uint16_t period_raw = 0;
+  static uint16_t period_raw = 0;
+  static uint32_t last_time = 0;
+  static uint32_t now = 0;
 
   /* 无滴超时时间 (ms) */
   const uint32_t timeout_slow     = 6000;  // 6秒 → 超低速
@@ -285,31 +286,44 @@ void StartFlowDetectTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    /*-------------------------------
-      1. 更新计数法
-    -------------------------------*/
-    Update_Count_Speed();
+    osDelay(100);
 
-    /*-------------------------------
-      2. 周期法计算
-    -------------------------------*/
+    // 1. 系统 IDLE 重置机制: 进入 IDLE 时清理所有状态
+    if (xSystemState == IDLE) {
+      flow.speed_cpm = 0;
+      flow.speed_period = 0;
+      flow.speed_count = 0;
+      flow_flags = 0;
+      xAlarmState = ALARM_NONE;
+
+      continue;
+    }
+
+    // 2. 更新计数法数据
+    now = HAL_GetTick();
+
+    if (now - last_time >= 1000) {
+      // 次/分钟 = count * 60
+      flow.speed_count = flow.pulse_count * 60;
+
+      flow.pulse_count = 0;
+      last_time = now;
+    }
+
+    // 3. 周期法计算
     if (flow.interval_ms > 0 && flow.interval_ms < 3000) {
       period_raw = Calc_Period_Speed(flow.interval_ms);
       flow.speed_period = EMA_Filter(flow.speed_period, period_raw);
     }
 
-    /*-------------------------------
-      3. 融合速度计算
-    -------------------------------*/
+    // 4. 融合速度计算
     flow.speed_cpm = Fuse_Speed(
       flow.speed_period,
       flow.speed_count,
       flow.interval_ms
     );
 
-    /*-------------------------------
-      4. 超低速和完成判断
-    -------------------------------*/
+    // 5. 超低速和完成判断
     uint32_t no_pulse_time = HAL_GetTick() - flow.last_tick;
 
     // 完成判定（一次性触发）
@@ -317,15 +331,15 @@ void StartFlowDetectTask(void *argument)
       flow_flags |= FLOW_FLAG_STOPPED; // 标记完成
       xAlarmState = ALARM_COMPLETE;
       flow.speed_cpm = 0;
+
     } else if (no_pulse_time >= timeout_slow && no_pulse_time < timeout_complete) {
       flow_flags |= FLOW_FLAG_SLOW;    // 标记超低速
+
     } else {
       flow_flags &= ~FLOW_FLAG_SLOW;   // 清除低速标志
 
-      /*-------------------------------
-        5. 根据速度更新报警状态
-      -------------------------------*/
-      if (!(flow_flags & FLOW_FLAG_STOPPED)) {  // 完成锁定期间不更新其他ALARM
+      // 6. 根据速度更新报警状态
+      if (!(flow_flags & FLOW_FLAG_STOPPED)) {  // 完成锁定期间不更新其他ALARM状态
         if (flow.speed_cpm > xFlowRateLimits[1]) {
           xAlarmState = ALARM_HIGH;
         } else if (flow.speed_cpm < xFlowRateLimits[0] && flow.speed_cpm > 0) {
@@ -335,20 +349,6 @@ void StartFlowDetectTask(void *argument)
         }
       }
     }
-
-    /*-------------------------------
-      6. 系统IDLE重置机制
-      进入IDLE时清理所有状态
-    -------------------------------*/
-    if (xSystemState == IDLE) {
-      flow.speed_cpm = 0;
-      flow.speed_period = 0;
-      flow.speed_count = 0;
-      flow_flags = 0;
-      xAlarmState = ALARM_NONE;
-    }
-
-    osDelay(100);
   }
 
   /* USER CODE END StartFlowDetectTask */
@@ -557,35 +557,21 @@ static uint16_t EMA_Filter(uint16_t prev, uint16_t now) {
   return (prev * 3 + now) / 4;
 }
 
-static void Update_Count_Speed(void) {
-  static uint32_t last_time = 0;
-  uint32_t now = HAL_GetTick();
-
-  if (now - last_time >= 1000) {
-    // 次/分钟 = count * 60
-    flow.speed_count = flow.pulse_count * 60;
-
-    flow.pulse_count = 0;
-    last_time = now;
-  }
-}
-
 static uint16_t Fuse_Speed(uint16_t sp_period, uint16_t sp_count, uint32_t dt) {
-  // 阈值：500ms（≈2Hz）
-  if (dt >= 500) {
+  if (dt >= 500) {  // 2 Hz, 120 Ticks/min
     // 低速：完全用周期法
     return sp_period;
 
-  } else if (dt <= 100) {
+  } else if (dt <= 200) {   // 5 Hz, 300 Ticks/min
     // 高速：完全用计数法
     return sp_count;
 
   } else {
     // 中间区：线性融合
-    uint32_t w = (dt - 100);   // 0~400
+    uint32_t w = (dt - 200);   // 0~300
     // period权重：w，count权重：400-w
 
-    return (sp_period * w + sp_count * (400 - w)) / 400;
+    return (sp_period * w + sp_count * (300 - w)) / 300;
   }
 }
 
